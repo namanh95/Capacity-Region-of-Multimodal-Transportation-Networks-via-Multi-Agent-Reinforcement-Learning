@@ -1,0 +1,237 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib import cm
+from matplotlib.colors import TwoSlopeNorm
+
+# --------------------------------------------------
+# Publication-style plotting
+# --------------------------------------------------
+plt.rcParams.update({
+    "font.size": 12,
+    "font.family": "serif",
+    "axes.labelsize": 13,
+    "axes.titlesize": 15,
+    "legend.fontsize": 11,
+    "figure.dpi": 300
+})
+
+
+def lyapunov_function(x_car, x_bus, safe_bound):
+    """
+    Hard overload Lyapunov function:
+        V(x) = [max(0, x_car + x_bus - safe_bound)]^2
+    """
+    overload = np.maximum(0.0, x_car + x_bus - safe_bound)
+    return overload**2
+
+
+def controlled_next_state(
+    x_car,
+    x_bus,
+    c_e,
+    eta,
+    demand_car=14.0,
+    demand_bus=7.0,
+    service_car=18.0,
+    service_bus=10.0,
+    control_gain=0.35,
+):
+    """
+    Stylized one-step controlled dynamics for a single edge with two interacting modes.
+    """
+    safe_bound = eta * c_e
+    total_load = x_car + x_bus
+
+    # Overload beyond the safety frontier
+    overload = np.maximum(0.0, total_load - safe_bound)
+
+    # MFD-style congestion factor: service deteriorates in heavy congestion
+    density_ratio = total_load / max(c_e, 1e-8)
+
+    mfd_factor = np.where(
+        density_ratio <= eta,
+        1.0,
+        np.maximum(0.20, 1.0 - ((density_ratio - eta) / max(1e-8, 1.50 - eta))**2),
+    )
+
+    # Stabilizing feedback: stronger control once the state leaves the safe region
+    feedback = control_gain * overload
+
+    # Mode-specific service with mild asymmetry
+    mu_car = np.minimum(
+        x_car + demand_car,
+        (service_car + 0.60 * feedback) * mfd_factor
+    )
+    mu_bus = np.minimum(
+        x_bus + demand_bus,
+        (service_bus + 0.40 * feedback) * mfd_factor
+    )
+
+    # Small routing suppression under overload
+    lambda_car = np.maximum(0.0, demand_car - 0.08 * feedback)
+    lambda_bus = np.maximum(0.0, demand_bus - 0.04 * feedback)
+
+    x_car_next = np.maximum(0.0, x_car + lambda_car - mu_car)
+    x_bus_next = np.maximum(0.0, x_bus + lambda_bus - mu_bus)
+
+    return x_car_next, x_bus_next
+
+
+def foster_lyapunov_two_panel():
+    # --------------------------------------------------
+    # State space
+    # --------------------------------------------------
+    x_car = np.linspace(0, 120, 120)
+    x_bus = np.linspace(0, 120, 120)
+    X, Y = np.meshgrid(x_car, x_bus)
+
+    # --------------------------------------------------
+    # Capacity geometry
+    # --------------------------------------------------
+    c_e = 100.0
+    eta = 0.90
+    safe_bound = eta * c_e
+
+    # --------------------------------------------------
+    # Panel 1: Lyapunov overload surface
+    # --------------------------------------------------
+    V = lyapunov_function(X, Y, safe_bound)
+
+    # --------------------------------------------------
+    # Panel 2: One-step drift surface
+    # --------------------------------------------------
+    X_next, Y_next = controlled_next_state(X, Y, c_e, eta)
+    V_next = lyapunov_function(X_next, Y_next, safe_bound)
+    Delta_V = V_next - V
+
+    # Symmetric normalization around zero for drift panel
+    drift_abs = np.max(np.abs(Delta_V))
+    drift_norm = TwoSlopeNorm(vmin=-drift_abs, vcenter=0.0, vmax=drift_abs)
+
+    # --------------------------------------------------
+    # Build figure
+    # --------------------------------------------------
+    # Slightly widened figure to accommodate the colorbars and paddings better
+    fig = plt.figure(figsize=(18, 8))
+
+    # ===== Left panel: V(x)
+    ax1 = fig.add_subplot(121, projection="3d")
+    surf1 = ax1.plot_surface(
+        X, Y, V,
+        cmap=cm.viridis,
+        edgecolor="none",
+        alpha=0.88,
+        antialiased=True
+    )
+
+    boundary_x = np.linspace(0, safe_bound, 200)
+    boundary_y = safe_bound - boundary_x
+    ax1.plot(
+        boundary_x,
+        boundary_y,
+        zs=0,
+        zdir="z",
+        color="red",
+        linewidth=3,
+        label=r"Safe frontier $\partial \mathcal{C}^{\eta}$"
+    )
+
+    # UPGRADE: Increased labelpad and tick padding
+    ax1.set_xlabel(r"Car load $x_e^{\mathrm{car}}$", labelpad=18)
+    ax1.set_ylabel(r"Bus load $x_e^{\mathrm{bus}}$", labelpad=18)
+    ax1.set_zlabel(r"$V(x)$", labelpad=15)
+    ax1.set_title(r"(a) Lyapunov overload functional", pad=20)
+    ax1.view_init(elev=25, azim=45)
+    
+    # UPGRADE: Reduced tick density to prevent numbers from overlapping
+    ax1.set_xticks([0, 40, 80, 120])
+    ax1.set_yticks([0, 40, 80, 120])
+    ax1.tick_params(axis='x', pad=5)
+    ax1.tick_params(axis='y', pad=5)
+    ax1.tick_params(axis='z', pad=8)
+    
+    ax1.set_xlim(0, 120)
+    ax1.set_ylim(0, 120)
+    ax1.set_zlim(0, np.max(V) * 1.02)
+
+    # UPGRADE: Added more pad to the colorbar so it doesn't hit the Z-axis label
+    cbar1 = fig.colorbar(
+        surf1,
+        ax=ax1,
+        shrink=0.55,
+        aspect=15,
+        pad=0.15
+    )
+    cbar1.set_label(r"Lyapunov energy", labelpad=15)
+
+    # ===== Right panel: Delta V(x)
+    ax2 = fig.add_subplot(122, projection="3d")
+    surf2 = ax2.plot_surface(
+        X, Y, Delta_V,
+        cmap=cm.coolwarm,
+        norm=drift_norm,
+        edgecolor="none",
+        alpha=0.90,
+        antialiased=True
+    )
+
+    # Safe frontier on the zero plane for reference
+    ax2.plot(
+        boundary_x,
+        boundary_y,
+        zs=0,
+        zdir="z",
+        color="black",
+        linewidth=2.5,
+        linestyle="--",
+        label=r"Safe frontier $\partial \mathcal{C}^{\eta}$"
+    )
+
+    # UPGRADE: Increased labelpad and tick padding
+    ax2.set_xlabel(r"Car load $x_e^{\mathrm{car}}$", labelpad=18)
+    ax2.set_ylabel(r"Bus load $x_e^{\mathrm{bus}}$", labelpad=18)
+    ax2.set_zlabel(r"$\Delta V(x)$", labelpad=15)
+    ax2.set_title(r"(b) One-step Foster--Lyapunov drift", pad=20)
+    ax2.view_init(elev=25, azim=45)
+    
+    # UPGRADE: Reduced tick density
+    ax2.set_xticks([0, 40, 80, 120])
+    ax2.set_yticks([0, 40, 80, 120])
+    ax2.tick_params(axis='x', pad=5)
+    ax2.tick_params(axis='y', pad=5)
+    ax2.tick_params(axis='z', pad=8)
+
+    ax2.set_xlim(0, 120)
+    ax2.set_ylim(0, 120)
+    ax2.set_zlim(np.min(Delta_V) * 1.05, np.max(Delta_V) * 1.05)
+
+    # UPGRADE: Added more pad to the colorbar
+    cbar2 = fig.colorbar(
+        surf2,
+        ax=ax2,
+        shrink=0.55,
+        aspect=15,
+        pad=0.15
+    )
+    cbar2.set_label(r"One-step drift", labelpad=15)
+
+    # Main title
+    fig.suptitle(
+        "Lyapunov Geometry and Foster–Lyapunov Drift in a Two-Mode Capacity Region",
+        fontsize=17,
+        y=0.95
+    )
+
+    # UPGRADE: Replaced plt.subplots_adjust with a much cleaner tight_layout approach
+    # w_pad controls the horizontal spacing between the two 3D plots
+    plt.tight_layout(pad=3.0, w_pad=6.0, rect=[0, 0, 1, 0.92])
+
+    # Save both vector and raster versions
+    plt.savefig("foster_lyapunov_two_panel.pdf", bbox_inches="tight")
+    plt.savefig("foster_lyapunov_two_panel.png", bbox_inches="tight", dpi=300)
+
+    plt.show()
+
+
+if __name__ == "__main__":
+    foster_lyapunov_two_panel()
